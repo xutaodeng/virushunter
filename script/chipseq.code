@@ -1,0 +1,73 @@
+#!/bin/bash
+servers=(bsidna2 bsidna3 bsidna4 bsidna6 bsidna7 bsidna8 bsidna9 bsidna11 bsidna12 bsidna13 bsidna14 bsidna15 bsidna17 bsidna18 bsidna19 bsidna20 bsidna21 bsidna22 bsidna23 bsidna25 bsidna27 bsidna28 bsidna29 bsidna30)
+inputs=(Sample_167_2_Input Sample_167_3_Input Sample_167_5_Input Sample_180_1_Input Sample_180_2_Input Sample_180_3_Input Sample_180_4_Input Sample_180_5_Input Sample_181_4_Input)
+treats=(Sample_167_2_K27Ac Sample_167_3_K27Ac Sample_167_5_K27Ac Sample_180_1_K27Ac Sample_180_2_K27Ac Sample_180_3_K27Ac Sample_180_4_K27Ac Sample_180_5_K27Ac Sample_181_4_K27Ac)
+#inputs=(Sample_167_1_Input Sample_167_2_Input Sample_167_3_Input Sample_167_5_Input Sample_180_1_Input Sample_180_2_Input Sample_180_3_Input Sample_180_4_Input Sample_180_5_Input Sample_181_4_Input)
+#treats=(Sample_167_1_K27Ac Sample_167_2_K27Ac Sample_167_3_K27Ac Sample_167_5_K27Ac Sample_180_1_K27Ac Sample_180_2_K27Ac Sample_180_3_K27Ac Sample_180_4_K27Ac Sample_180_5_K27Ac Sample_181_4_K27Ac)
+
+samples=( ${inputs[@]} ${treats[@]} )
+wd=`pwd`
+rm concat.sh
+rm sai.sh
+rm samse.sh
+rm cs.sh
+rm pipeline.sh
+
+k=0
+#for i in $( ls -d */); do
+for i in "${samples[@]}" 
+do
+	j=$[k%24]
+	#echo $i
+	echo ssh ${servers[${j}]} '"''cd'  ${wd}/${i} '&&' 'zcat ' *.gz '>' ${i}.fastq'"' '&' >> concat.sh
+	echo ssh ${servers[${j}]} '"''cd'  ${wd}/${i} '&&' '/mnt/cluster/tools/bwa-0.7.12/bwa aln -t 6 /mnt/san/cluster/mm10/Mus_musculus/UCSC/mm10/Sequence/BWAIndex/genome.fa ' ${i}.fastq '>' ${i}.sai '"&' >>sai.sh
+	echo ssh ${servers[${j}]} '"''cd'  ${wd}/${i} '&&' '/mnt/cluster/tools/bwa-0.7.12/bwa samse /mnt/san/cluster/mm10/Mus_musculus/UCSC/mm10/Sequence/BWAIndex/genome.fa ' ${i}.sai ${i}.fastq '>' ${i}.sam '"&' >>samse.sh
+	#echo ssh ${servers[${j}]} '"''cd'  ${wd}/${i} '&&' '/mnt/cluster/tools/bwa-0.7.12/bwa mem -t 6 /mnt/san/cluster/mm10/Mus_musculus/UCSC/mm10/Sequence/BWAIndex/genome.fa ' ${i}.fastq '>' ${i}.sam '"&'
+	((k++))
+done
+
+
+
+echo 'mkdir ./Targets_ChIPseeqer/' >>cs.sh
+for i in "${samples[@]}" 
+do
+####### split files ############################
+echo 'ChIPseeqerSplitReadFiles --format=sam --files="'${i}/${i}'.sam"  --outputFolder=./CHIP_'${i} >>cs.sh
+#### clonal reads ################
+echo 'ChIPseeqerGetNumClonalReads -chipdir ./CHIP_'${i}'/ -format sam -chrdata /mnt/san/cluster/bsidna1_local/ChIPseeqer-2.1/dist/DATA/mm10.chrdata > ./Clonal/Clonal_'${i}.txt >>cs.sh
+
+##### QC GC% ######################
+echo 'ChIPseeqerQC --files=./'${i}/${i}'.sam  --format=sam --qcType=all > ./QC/'${i}.QC.txt >>cs.sh
+### bigwig reads ############################
+echo 'ChIPseeqerMakeReadDensityTrack --readdir=./CHIP_'${i}/  --format=sam  --trackname='"'${i}_reads'"'  --chrdata=/mnt/san/cluster/bsidna1_local/ChIPseeqer-2.1/dist/DATA/mm10.chrdata  --bigwig=1  --normalize=1  --uniquereads=1  --ws=10   --inc=10  --fraglen=0  >>cs.sh
+echo 'wigToBigWig  CHIP_'${i}/${i}_reads.wig   /mnt/san/cluster/bsidna1_local/ChIPseeqer-2.1/dist/DATA/mm10.chrom.sizes  ./wig/Sample_167_1_Input_reads.bigWIG >>cs.sh
+done
+
+tLen=${#inputs[@]}
+ 
+### peak calling #################################
+for (( i=0; i<${tLen}; i++ ));
+do
+  c=${inputs[$i]}
+  t=${treats[$i]}
+  echo 'ChIPseeqer.bin -chipdir ./CHIP_'${t}/ -inputdir ./CHIP_${c}/ -chrdata /mnt/san/cluster/bsidna1_local/ChIPseeqer-2.1/dist/DATA/mm10.chrdata -t 15 -fold_t 2 -format sam -readlen 50 -fraglen 170 -uniquereads 1 -outfile ./Targets_ChIPseeqer/${t}_Target_ChIPseeqer.txt >>cs.sh 
+  ### bigbed peaks ############################
+  echo 'ChIPseeqerPeaksTrack --targets=./Targets_ChIPseeqer/'${t}'_Target_ChIPseeqer.txt --trackname="'${t}'_peaks"' >> cs.sh
+
+  echo 'cut -f 1-3 ./Targets_ChIPseeqer/'${t}'_Target_ChIPseeqer.txt > ./Targets_ChIPseeqer/'${t}_Target_ChIPseeqer.wgl >>cs.sh
+  echo 'bedToBigBed ./Targets_ChIPseeqer/'${t}_Target_ChIPseeqer.wgl  /mnt/san/cluster/bsidna1_local/ChIPseeqer-2.1/dist/DATA/mm10.chrom.sizes  ./wig/${t}_peaks.bigBED >>cs.sh
+
+####### gene annot ##############################
+ echo 'mkdir ./Targets_ChIPseeqer/Annot_'${t} >>cs.sh
+ echo 'ChIPseeqerAnnotate --peakfile=./Targets_ChIPseeqer/'${t}'_Target_ChIPseeqer.txt --genome=mm10  --lenuP=2000 --lendP=2000 --lendDW=1000  --lenuDW=1000'>>cs.sh
+done
+
+echo concat.sh >>pipeline.sh
+echo wait >>pipeline.sh
+echo sai.sh >>pipeline.sh
+echo wait >>pipeline.sh
+echo samse.sh >>pipeline.sh
+echo wait >>pipeline.sh
+echo cs.sh >>pipeline.sh
+
+
